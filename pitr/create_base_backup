@@ -1,0 +1,169 @@
+#!/bin/bash -e
+
+# This script creates a base backup of a PostgreSQL cluster
+
+# Constant values
+set -u
+SRC=${0%/*}
+. $SRC/defaults
+
+# Constant values
+TARBALL=$BASE_BACKUP_NAME
+WORKING="$BASE_BACKUPS/$(basename ${TARBALL%.tar.gz}.working)"
+PSQL="psql -U postgres template1"
+
+# Make sure WALs are being archived (.backup files don't count)
+echo " >>> Checking for archival validity"
+if ! ls $WALs | grep -v backup | egrep -q $RE_WAL; then
+    echo "Please ensure WAL files are being archived to: $WALs"
+    echo "Did you maybe just backup a few minutes ago?"
+    echo "Please give the db some time to archive >= 1 WAL and try again"
+    exit 1
+fi
+
+# Make sure the data directory exists
+echo " >>> Checking data directory"
+if [ ! -d $DATA ]; then
+    echo "The $DATA directory does not exist"
+    exit 1
+fi
+
+# Remove any archived .backup files that still exist
+echo " >>> Checking for old .backup files"
+for backup in $DATA/pg_xlog/*.backup; do
+    if tree $ARCHIVE | grep $(basename $backup) > /dev/null; then
+        if rm $backup; then
+            echo " >>> Purged $backup"
+        else
+            echo " >>> ERROR: Unable to delete $backup"
+        fi
+    fi
+done
+
+# Make sure there aren't any unarchived WAL.backup files present
+echo " >>> Checking for unfinished base backups"
+if [ -f $DATA/pg_xlog/*.backup ]; then
+    echo "There seems to be a backup already in progress, bailing"
+    exit 1
+fi
+
+# Tell PostgreSQL that we want to do a base backup:
+echo " >>> Informing the database of intent to backup"
+if ! $PSQL -c "SELECT pg_start_backup('$TARBALL');" > /dev/null; then
+    echo "Executing pg_start_backup('$TARBALL') failed"
+    exit 1
+fi
+
+# Create the working directory
+echo " >>> Creating working directory"
+if ! mkdir $WORKING; then
+    echo "Unable to create the working dir: $WORKING"
+    exit 1
+fi
+
+# Rsync the data directory into the working directory
+echo " >>> Copying database files"
+if ! rsync -aqvz $DATA $WORKING; then
+    echo "Rsync failed to copy $DATA"
+    exit 1
+fi
+
+# Change into the working directory
+echo " >>> Entering working directory"
+if ! cd $WORKING; then
+    echo "Unable to cd into $WORKING"
+    exit 1
+fi
+
+# Create the backup using tar (for now)
+echo " >>> Creating tarball of database files"
+if ! tar zcpf $BASE_BACKUPS/$TARBALL data --exclude=pg_xlog/*; then
+    echo "Unable to create $TARBALL"
+    exit 1
+fi
+
+# Go back to the root of the base_backups
+if ! cd $BASE_BACKUPS; then
+    echo "Unable to cd up to the base_backups directory"
+    exit 1
+fi
+
+# Delete the working directory
+echo " >>> Removing working directory"
+if ! rm -rf $WORKING; then
+    echo "Unable to delete the working directory"
+    exit 1
+fi
+
+# Tell PostgreSQL that the base backup is finished
+echo " >>> Informing the database that the backup is nearly finished"
+if ! $PSQL -c "SELECT pg_stop_backup();" > /dev/null; then
+    echo "Executing pg_stop_backup() failed"
+    exit 1
+fi
+
+# Fetch the oldest WAL file that we need (we need all that come after it)
+echo " >>> Determining the WAL required for this backup"
+KEEP=$(basename $(ls $DATA/pg_xlog/*.backup) | awk -F "." {'print $1'})
+
+# Create an archive directory to hold what we don't need anymore
+echo " >>> Creating archive directory"
+ARCHIVE="$BASE_BACKUPS/b4-${TARBALL%.tar.gz}.archive"
+if ! mkdir $ARCHIVE; then
+    echo "Unable to create $ARCHIVE"
+    exit 1
+fi
+
+# Archive all tarballs no longer needed
+echo " >>> Archiving old cruft"
+for file in $(ls $BASE_BACKUPS | grep 'tar.gz'); do
+    if [ "$file" != "$TARBALL" ]; then
+        mv $BASE_BACKUPS/$file $ARCHIVE
+    fi
+done
+
+# Archive all WAL files no longer needed
+for file in $(ls $WALs); do
+    # If we happen to find the WALL we need to keep, stop
+    if echo $file | grep -q $KEEP; then
+        break
+    else
+        mv $WALs/$file $ARCHIVE
+    fi
+done
+
+# Once the WAL.backup has safely been archived, delete it
+echo -n " >>> Removing WAL.backup"
+ATTEMPTS=0
+while true; do
+    let ATTEMPTS+=1
+    for file in $(ls $WALs/*.backup); do
+        if echo $file | grep -q $KEEP; then
+            if rm $DATA/pg_xlog/*.backup; then
+                echo " [ OK ]"
+                break 2
+            else
+                echo " [ ERROR] Unable to delete"
+                exit 1
+            fi
+        fi
+    done
+
+    echo -n "..."
+    if [[ "$ATTEMPTS" -gt 5 ]]; then
+        echo
+        echo " >>> Unable to delete the WAL.backup as it isn't yet archived"
+        echo " >>> This is not an error conidition, it's ok :)"
+    fi
+
+    # Give PostgreSQL time to archive
+    sleep 2
+done
+
+# Provide summary information on this backup
+echo " >>> Backup completed:"
+echo "    - Backup: $TARBALL"
+echo "    - Requires: >= $KEEP"
+echo " >>> Goodbye!"
+
+exit 0

@@ -1,0 +1,78 @@
+#!/bin/bash -e
+
+# Script to safely copy PostgreSQL WAL files with proper exit status
+# codes.
+# 
+# This script is indented to be ran by the postgres user, via the
+#       "archive_command" attribute in:
+#       /var/lib/postgresql/data/postgresql.conf
+#
+
+# Exit status codes
+EUNKNOWN=1
+EUSAGE=2
+ENOREPLACE=3
+EMISSINGDEST=4
+ECOPYFAILURE=5
+ECHECKSUMFAILURE=6
+ESOURCEWALLNOTFOUND=7
+ECHMODFAILURE=8
+
+# Gather the source/destination
+WAL_ORIG=$1
+WAL_ARCHIVE=$2
+
+# Help information
+function usage {
+    echo "Usage: ./archive_command src/wal backup/wal"
+    echo "Examples:"
+    echo "  archive_command pg_xlog/foo /BACKUPS/pg/foo"
+    exit $EUSAGE
+}
+
+# Make sure the paths are valid
+if [ ! -f "$WAL_ORIG" ]; then
+    echo "Source file '$WAL_ORIG' does not exist"
+    exit $ESOURCEWALLNOTFOUND
+fi
+
+# If the archive path didn't include a filename, add it
+if [ -d "$WAL_ARCHIVE" ]; then
+    WAL_ARCHIVE="$(dirname $WAL_ARCHIVE/X)/$(basename $WAL_ORIG)"
+fi
+
+# Make sure the archive directory exists
+if [ ! -d "$(dirname $WAL_ARCHIVE)" ]; then
+    echo "$(dirname $WAL_ARCHIVE) does not exist, unable to copy there"
+    exit $EMISSINGDEST
+fi
+
+# Make sure the WAL isn't alrady backed up
+if [ -f "$WAL_ARCHIVE" ]; then
+    echo "$WAL_ARCHIVE already exists, refusing to overwrite it"
+    exit $ENOREPLACE
+fi
+
+# Perform the copy, using -i in case something sneaks in somehow
+if ! cp -i $WAL_ORIG $WAL_ARCHIVE; then
+    echo "Failed to copy"
+    exit $ECOPYFAILURE
+fi
+
+# Give the datamover rights to backup the WAL
+if ! chmod g+r $WAL_ARCHIVE; then
+    echo "Error giving datamover read rights"
+    exit $ECHMODFAILURE
+fi
+
+# Make sure the copy was successful
+ORIG=$(md5sum $WAL_ORIG | awk '{print $1}')
+COPY=$(md5sum $WAL_ARCHIVE | awk '{print $1}')
+
+if [ "X$ORIG" != "X$COPY" ]; then
+    echo "The copy completed, but the checksums do not match"
+    exit $ECHECKSUMFAILURE
+fi
+
+# All is well
+exit 0

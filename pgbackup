@@ -1,0 +1,110 @@
+#!/bin/bash -e
+
+# Perform an ascii backup of a single PostgreSQL database
+
+# Constant values
+set -u
+SRC=${0%/*}
+source $SRC/pitr/defaults
+
+DB=$1
+BACKUP="${DB}-$(date +'%Y%m%d-%H%M%S')-$(hostname)"
+
+# Check to make sure the db is specified
+if [ "$DB" = "" ]; then
+    echo "Please specify which database you want to backup"
+    echo "Example usage: root# pgbackup ntdi"
+    exit 1
+fi
+
+# Check to make sure the backup dir exists
+if [ ! -d $ARCHIVE ]; then
+    if ! mkdir -p $ARCHIVE; then
+        echo "ERROR: Unable to create: $ARCHIVE"
+        exit 1
+    fi
+fi
+
+# Change into the backups directory
+if ! cd $ARCHIVE; then
+    echo "Unable to cd into $ARCHIVE"
+    exit 1
+fi
+
+# Create a temporary working directory and cd into it
+tmpdir="processing-backup.$$"
+if ! mkdir $tmpdir; then
+    echo "Unable to create $ARCHIVE/$tmpdir"
+    exit 1
+else
+    cd $tmpdir
+fi
+
+# Perform the backup
+if ! $(pg_dump -U postgres $DB > $BACKUP.sql); then
+    echo "ERROR: Unable to create $BACKUP.sql"
+    exit 1
+fi
+
+# Generate MD5 of the backup
+echo "# MD5 HASH" > $BACKUP.DIGESTS
+if ! md5sum $BACKUP.sql >> $BACKUP.DIGESTS; then
+    echo "ERROR: Unable to create $BACKUP.DIGESTS"
+    exit 1
+fi
+
+# Generate SHA1 hash of the backup
+echo "# SHA1 HASH" >> $BACKUP.DIGESTS
+if ! sha1sum $BACKUP.sql >> $BACKUP.DIGESTS; then
+    echo "ERROR: Unable to create $BACKUP.sql"
+    exit 1
+fi
+
+# Attempt to backup the database configuration
+dirs="/var/lib/postgresql/data/"
+for dir in $dirs; do
+    config=$dir/pg_hba.conf
+    if [ -f $config ]; then
+        cp $config .
+        cp $dir/postgresql.conf .
+        cp $dir/pg_ident.conf .
+        cp -R $dir/pg_log pg_log
+        break
+    fi
+done
+
+# Attempt to backup OS configuration
+files="/etc/conf.d/postgresql"
+for config in $files; do
+    if [ -f $config ]; then
+        cp $config "DISTRO$(echo $config | tr '/' '_')"
+    fi
+done
+
+# Create a tarbal of the backup artifacts
+if ! tar zcpf $BACKUP.tar.gz *; then
+    echo "ERROR: Unable to create $BACKUP.tar.gz"
+    exit 1
+fi
+
+# Move the tarball up into the archive
+if ! mv $BACKUP.tar.gz ..; then
+    echo "ERROR: Unable to move the tarball into $ARCHIVE"
+    exit 1
+fi
+
+# Move back to the archive directory
+if ! cd $ARCHIVE; then
+    echo "ERROR: Unable to cd to $ARCHIVE"
+    exit 1
+fi
+
+# Delete the temporary working directory
+if ! rm -rf $ARCHIVE/$tmpdir; then
+    echo "ERROR: Unable to delete $ARCHIVE/$tmpdir"
+    exit 1
+fi
+
+# All is well
+exit 0
+

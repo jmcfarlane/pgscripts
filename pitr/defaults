@@ -1,0 +1,18 @@
+# Set default values used by the PostgreSQL PITR backup/recovery scripts
+
+export STATUS_OK="[\033[1;32m OK\033[0m ]"
+export STATUS_FAIL="[\033[1;31m !!\033[0m ]"
+
+export BASE_BACKUP_NAME="$(date +'%Y%m%d-%I%M%S')-pg-$(hostname).tar.gz"
+export ARCHIVE=/BACKUPS/localhost/pgsql
+export DATA=/var/lib/postgresql/data
+export BASE_BACKUPS="$ARCHIVE/base_backups"
+export WALs=$ARCHIVE/WALs
+export BASE_BACKUP="Please specify base backup file"
+export RECOVERY="/usr/share/postgresql/recovery.conf.sample"
+export RESTORE_CMD="/opt/thinkronize/postgresql/pitr/restore_command"
+export RECOVERY_TARGET="DEFAULT"
+
+#export RE_BASE_BACKUPS='^[0-9]{8}-[0-9]{6}-pg-[-a-zA-Z0-9]+.*gz$'
+export RE_BASE_BACKUPS='^[0-9]{8}'
+export RE_WAL='^[0-9a-zA-Z.]+$'

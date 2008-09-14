@@ -1,0 +1,51 @@
+#!/bin/bash -u
+
+# Script to interactively perform a full PostgreSQL recovery from PITR
+# and base backups
+
+SRC=${0%/*}
+. $SRC/pitr/defaults
+
+# Determine the PostgreSQL data directory
+echo -n " >>> PostgreSQL data directory [$DATA]: "
+read answer
+export DATA=${answer:-$DATA}
+
+# Determine the archive directory (and relative base_backups directory)
+echo -n " >>> Specify archive dir [$ARCHIVE]:"
+read answer
+export ARCHIVE=${answer:-$ARCHIVE}
+export BASE_BACKUPS="$ARCHIVE/base_backups"
+
+# Determine the recommended base backup
+base_backups=$(ls -r $BASE_BACKUPS | egrep "$RE_BASE_BACKUPS")
+for backup in $base_backups; do
+    recommended=$backup
+    break
+done
+
+# Determine which base backup to restore from
+echo -n " >>> Specify backup to restore [$recommended]: "
+read answer
+base_backup=${answer:-$recommended}
+export BASE_BACKUP=$BASE_BACKUPS/$base_backup
+
+# Determine where to make the copy of the current cluster
+b4restore="/tmp/${BASE_BACKUP_NAME%.tar.gz}-pg-snapshot-b4-restore"
+echo -n " >>> Backup current state [$b4restore]: "
+read answer
+export B4RESTORE=${answer:-$b4restore}
+echo
+
+# Determine when to restore to (PIT)
+echo " ==> This is a Point In Time Recovery..."
+echo " ==> The default behavior is to restore all possible data..."
+echo " ==> Example format of recovery time: 2008-05-12 22:03:00"
+echo " ==> Example format of recovery time: 2008-05-12 22:03:00 EST"
+echo -n " >>> What time do you want to recover to [default]: "
+read answer
+export RECOVERY_TARGET=${answer:-$RECOVERY_TARGET}
+echo
+
+# Execute the base recovery (which then consumes WALs)
+$SRC/pitr/restore_base_backup

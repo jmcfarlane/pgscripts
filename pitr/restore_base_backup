@@ -1,0 +1,216 @@
+#!/bin/bash -u
+
+# This script restores from a base backup of a PostgreSQL cluster
+
+function test_object {
+    if [ "$1" "$2" ]; then
+        status=$STATUS_OK
+        intreturn=0
+    else
+        status=$STATUS_FAIL
+        intreturn=1
+    fi
+    
+    echo -e " >>> $3^$status" | awk -F^ '
+        {printf("%-72s %+6s \n", $1, $2)}
+    '
+
+    sleep 0.25
+    return $intreturn
+}
+
+function test_dir {
+    test_object "-d" "$1" "$1 exists"
+}
+
+function test_equals {
+    if [ "X$1" == "X$2" ]; then
+        status=$STATUS_OK
+    else
+        status=$STATUS_FAIL
+    fi
+    
+    echo -e " >>> $3^$status" | awk -F^ '
+        {printf("%-72s %+6s \n", $1, $2)}
+    '
+
+    if [ "$status" == "$STATUS_FAIL" ]; then
+        exitcode=${4:-1}
+
+        if [ "$exitcode" != 0 ]; then
+            echo " >>> Exiting due to the above error"
+            exit $exitcode
+        fi
+    fi
+}
+
+function test_file {
+    msg=${2:-"$1 exists"}
+    test_object "-r" "$1" "$msg"
+}
+
+function test_exec {
+    # Print command being ran
+    msg=${2:-$1}
+    echo " >>> $msg" | awk '
+        {printf("%-72s ", $0)}
+    '
+
+    # Print what happened
+    result=$($1 2>&1)
+    if [ "$?" == 0 ]; then
+        status=$STATUS_OK
+    else
+        status=$STATUS_FAIL
+    fi
+    echo -e $status
+
+    # Print the error and exit
+    if [ "$status" == "$STATUS_FAIL" ]; then
+        echo $result
+        echo " >>> Exiting due to the above error"
+        exit 1
+    fi
+}
+
+function test_executable {
+    test_object "-x" $1 "$1 is executable"
+}
+
+function test_writable {
+    test_object "-w" $1 "$1 is writable"
+}
+
+#==========================================================================
+# End of crazy
+
+backup=$(basename $BASE_BACKUP)
+
+# Make sure we know where the base backup is
+test_dir $ARCHIVE
+test_dir $ARCHIVE/WALs
+test_dir $ARCHIVE/base_backups
+test_dir $DATA
+test_file $BASE_BACKUP "$backup exists"
+
+# If the backup wasn't found, it could be in a b4-foo directory
+if [ "$?" != 0 ]; then
+    found=false
+    base_backup=$(basename $BASE_BACKUP)
+    for b4 in $(ls $ARCHIVE/base_backups | grep -E '^b4-'); do
+        msg="Checking for backup in $b4"
+        test_file $ARCHIVE/base_backups/$b4/$base_backup "$msg"
+        if [ $? == 0 ]; then
+            BASE_BACKUP=$ARCHIVE/base_backups/$b4/$base_backup
+            found=true
+            break
+        fi
+    done
+
+    if [ $found == false ]; then
+        echo " >>> Unable to find the base backup, please try again"
+        exit 1
+    fi
+fi
+
+# Check the configuration
+test_file $RECOVERY
+test_file $RESTORE_CMD
+test_executable $ARCHIVE/WALs
+test_executable $ARCHIVE/base_backups
+test_executable $DATA
+test_executable $RESTORE_CMD
+
+# Determine if the recovery target is a valid timestamp
+if [ "$RECOVERY_TARGET" != "DEFAULT" ]; then
+    sql="SELECT '$RECOVERY_TARGET'::TIMESTAMP;"
+    psql -U postgres template1 -c "$sql" > /dev/null
+    test_equals "$?" 0 "Recovery target (PIT) is valid"
+fi
+
+# Determine restore working directory
+WORK="/tmp/$(basename ${BASE_BACKUP%.tar.gz}).work"
+
+# Stop PostgreSQL
+test_exec "/etc/init.d/postgresql stop" "Stopping PostgreSQL"
+
+# Validate PostgreSQL is stopped
+result=$(ps -ef | egrep -e 'postmaster' -e 'postgres: ')
+test_equals "$?" 1 "PostgreSQL stopped"
+
+# Issue warning
+msg="Destructive work about to begin, ctrl+c to cancel"
+test_exec "sleep 5" "$msg"
+
+# Create the working directory
+test_exec "mkdir $WORK" "Creating $WORK"
+
+# Unpack the base backup
+test_exec "tar zxpf $BASE_BACKUP -C $WORK/" "Unpacking $backup"
+
+# Make sure permissions are correct on the files to be restored
+cmd="chown -R postgres:datamover"
+test_exec "$cmd $ARCHIVE/WALs" "Fixing permissions on: WALs"
+test_exec "$cmd $ARCHIVE/base_backups" "Fixing permissions on: base_backups"
+
+# Make a copy of the current data directory
+test_exec "mkdir $B4RESTORE" "Creating $B4RESTORE"
+test_exec "cp -Rp $DATA $B4RESTORE" "Making backup of current cluster"
+
+# Delete the current data directory
+test_exec "rm -rf $DATA" "Deleting current PostgreSQL data directory"
+
+# Move the restored backup into position
+test_exec "mv $WORK/data $DATA" "Moving the restored backup into position"
+
+# Clean up the working directory
+test_exec "rm -rf $WORK" "Cleaning up $WORK"
+
+# Create required structure [not] present in the backup
+archive_status=$DATA/pg_xlog/archive_status
+test_exec "mkdir $archive_status"
+test_exec "chown postgres:postgres $archive_status" "Fixing ownership"
+
+# Copy unarchived WAL segments from current state into new structure
+for WAL in $(ls $B4RESTORE/data/pg_xlog | grep -E $RE_WAL); do
+    cmd="cp -p $B4RESTORE/data/pg_xlog/$WAL $DATA/pg_xlog"
+    test_exec "$cmd" "Restoring unarchived WAL: $WAL"
+done
+
+# Copy the sample recovery file and make required changes to it
+recovery=$(basename $RECOVERY)
+recovery=$DATA/${recovery%.sample}
+test_exec "cp $RECOVERY $recovery" "recovery.conf: Creating"
+
+# Prepare edit to the recovery file: [restore_command]
+cmd="restore_command = '$RESTORE_CMD $ARCHIVE/WALs/%f %p'"
+
+# Apply the edit: [restore_command]
+sed -i $recovery -e "s|#restore_command = .*$|$cmd|g"
+test_equals "$?" 0 "restore.conf: Updated restore_command correctly"
+
+# Use the RECOVERY_TARGET if specified
+if [ "$RECOVERY_TARGET" != "DEFAULT" ]; then
+    # Prepare to edit the recovery file: [recovery_target_time]
+    cmd="recovery_target_time = '$RECOVERY_TARGET'"
+
+    # Apply the edit: [recovery_target_time]
+    sed -i $recovery -e "s|#recovery_target_time = .*$|$cmd|g"
+    test_equals "$?" 0 "restore.conf: Updated recovery_target_time correctly"
+fi
+
+# Tell the user to start watching the logs
+echo " >>> You should start tailing the logs now..."
+sleep 5
+
+# Start PostgreSQL
+test_exec "/etc/init.d/postgresql start" "Starting PostgreSQL"
+
+# Validate PostgreSQL started
+result=$(ps -ef | egrep -e 'postmaster' -e 'postgres: ')
+test_equals "$?" 0 "PostgreSQL started"
+
+# Give info on what to do next
+echo
+echo " ==> Don't forget to check for (and delete) recovery.done..."
+echo " ==> Don't forget to delete backup_label when the restore is done"

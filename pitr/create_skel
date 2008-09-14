@@ -1,0 +1,61 @@
+#!/bin/bash -u
+
+# Script to setup the required directory structure to support PITR
+
+# Constant values
+SRC=${0%/*}
+source $SRC/defaults
+
+# We want to be root
+if [ "$(whoami)" != "root" ]; then
+    echo "This script must run as root"
+    exit 1
+fi
+
+# Create the base structure
+if !  mkdir -p $ARCHIVE/{WALs,base_backups}; then
+    echo "Error creating the backup directory structure"
+    exit 1
+fi
+
+# Set ownership of the base_backups directory
+if ! chown -R postgres:datamover $ARCHIVE/base_backups; then
+    echo "Error chowning $ARCHIVE/base_backups to postgres:datamover"
+    exit 1
+fi
+
+# Set ownership of the WALs directory
+if ! chown -R postgres:datamover $ARCHIVE/WALs; then
+    echo "Error chowning $ARCHIVE/WALs to postgres:datamover"
+    exit 1
+fi
+
+# Set permissions of the WALs directory
+if ! chmod 2750 $ARCHIVE/WALs; then
+    echo "Error chmoding $ARCHIVE/WALs to 2750"
+    exit 1
+fi
+
+# Set permissions of the the WALs so the datamover can read them
+if ! chmod -R g+r $ARCHIVE/WALs; then
+    echo "Error chmoding $ARCHIVE/WALs/* "
+    exit 1
+fi
+
+# Check to see if archive_command is installed
+if [ ! -f "/usr/bin/archive_command" ]; then
+    pushd $SRC > /dev/null
+    echo "Please run this command and [then] try again:
+
+    ln -s $(pwd)/archive_command /usr/bin/archive_command"
+    popd > /dev/null
+fi
+
+# Provide help on how to enable WAL archiving
+echo " >>> CONFIGURATION TIPS:
+ >>> To enable WAL archiving make/validate the following changes:
+ root# vim /var/lib/postgresql/data/postgresql.conf
+ archive_command = '/usr/bin/archive_command %p $ARCHIVE/WALs/%f'
+ root# /etc/init.d/postgresql restart
+ >>> End of changes
+"

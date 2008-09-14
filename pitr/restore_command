@@ -1,0 +1,93 @@
+#!/bin/bash -u
+
+# Script to safely restore PostgreSQL WAL files with proper exit status
+# codes.
+# 
+# This script is intended to be ran by the postgres user, via the
+#       "restore_command" attribute in:
+#       /var/lib/postgresql/data/recovery.conf
+#
+# Practically speaking this will never happen unless pitr/restore_backup
+# is executed manually.  This script is what creates recovery.conf,
+# performs required prerequisites for recovery, and throws PostgreSQL into
+# recovery mode.
+
+# Exit status codes
+EUNKNOWN=1
+EUSAGE=2
+EARCHIVEWALLNOTFOUND=3
+EPGXLOGDIRNOTFOUND=4
+
+# Gather the source/destination
+WAL_ARCHIVE=$1
+WAL_XLOG=$2
+ARCHIVE=$(dirname $WAL_ARCHIVE)
+WAL=$(basename $WAL_ARCHIVE)
+DEBUG=${DEBUG:-false}
+
+# Print out variables being used
+if $DEBUG; then
+    echo "WAL_ARCHIVE: $WAL_ARCHIVE"
+    echo "WAL_XLOG: $WAL_XLOG"
+    echo "ARCHIVE: $ARCHIVE"
+    echo "WAL: $WAL"
+    echo
+fi
+
+# Help information
+function usage {
+    echo "Usage: ./restore_command backup/wal pg_xlog/wal"
+    echo "Examples:"
+    echo "  restore_command /BACKUPS/pg/foo /foo/pg_xlog/bar"
+    exit $EUSAGE
+}
+
+# Function to perform the copy, if/when the archived WAL is located
+function safe_copy {
+    SRC=$1
+    DEST=$2
+
+    # Determine if we have execute rights on the directory
+    if [ -x $(dirname $SRC) ]; then
+        if [ -f $SRC ]; then
+            # WAL found, attempting restoration
+            if cp $SRC $DEST; then
+                echo "Successfully restored: $(basename $SRC)"
+                return 0
+            else
+                echo "ERROR: Failed attempt to restore: $WAL"
+                echo "ERROR: Please fix the problem and try again"
+                exit 1
+            fi
+        fi
+    else
+        echo "ERROR: No execute rights on $(dirname $SRC)"
+        echo "ERROR: Please fix the permissions and try again"
+        exit 1
+    fi
+    
+    # The WAL wasn't found, keep trying
+    return 1
+}
+
+# Validate the destination directory exists
+if [ ! -d $(dirname $WAL_XLOG) ]; then
+    echo "ERROR: Cannot restore to [missing] directory: $(dirname $WAL_XLOG)"
+    exit $EPGXLOGDIRNOTFOUND
+fi
+
+# First look for the requested WAL in the current archive location
+if safe_copy $WAL_ARCHIVE $WAL_XLOG; then
+    exit 0
+fi
+
+# Next loop over all archive directories (in order) looking for it
+OLD_ARCHIVES="$ARCHIVE/../base_backups"
+for archive in $(ls $OLD_ARCHIVES | egrep '^b4.*archive$'); do
+    if safe_copy "$OLD_ARCHIVES/$archive/$WAL" $WAL_XLOG; then
+        exit 0
+    fi
+done
+
+echo "Unable to restore: $WAL (not an error condition)"
+exit 0
