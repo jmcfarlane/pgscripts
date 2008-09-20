@@ -68,7 +68,10 @@ for dir in $dirs; do
         cp $config .
         cp $dir/postgresql.conf .
         cp $dir/pg_ident.conf .
-        cp -R $dir/pg_log pg_log
+
+        if [ -f $dir/pg_log ]; then
+            cp -R $dir/pg_log pg_log
+        fi
         break
     fi
 done

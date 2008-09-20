@@ -10,7 +10,7 @@ export BASE_BACKUPS="$ARCHIVE/base_backups"
 export WALs=$ARCHIVE/WALs
 export BASE_BACKUP="Please specify base backup file"
 export RECOVERY="/usr/share/postgresql/recovery.conf.sample"
-export RESTORE_CMD="/opt/thinkronize/postgresql/pitr/restore_command"
+export RESTORE_CMD="/opt/Pgsripts/pitr/restore_command"
 export RECOVERY_TARGET="DEFAULT"
 
 #export RE_BASE_BACKUPS='^[0-9]{8}-[0-9]{6}-pg-[-a-zA-Z0-9]+.*gz$'
