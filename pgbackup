@@ -60,29 +60,66 @@ if ! sha1sum $BACKUP.sql >> $BACKUP.DIGESTS; then
     exit 1
 fi
 
+# Supported db configurations (aka where distros put stuff)
+dirs="
+    /etc/conf.d
+    /etc/postgresql/8.0/main
+    /etc/postgresql/8.1/main
+    /etc/postgresql/8.3/main
+    /etc/postgresql/8.4/main
+    /var/lib/postgresql/data
+    /var/log/postgresql
+"
+patterns="
+    *.conf
+    *.log
+    postgresql
+"
+
 # Attempt to backup the database configuration
-dirs="/var/lib/postgresql/data/"
 for dir in $dirs; do
-    config=$dir/pg_hba.conf
-    if [ -f $config ]; then
-        cp $config .
-        cp $dir/postgresql.conf .
-        cp $dir/pg_ident.conf .
-
-        if [ -f $dir/pg_log ]; then
-            cp -R $dir/pg_log pg_log
-        fi
-        break
+    if [ -d $dir ]; then
+        for pattern in $patterns; do
+            for file in $(find $dir -type f -name $pattern); do
+                if [ -r $file ]; then
+                    copydir=$(dirname $file)
+                    mkdir -p .$copydir
+                    cp $file .$copydir/
+                else
+                    echo "Unable to read from (thus backup): $file"
+                fi
+            done
+        done
     fi
 done
 
-# Attempt to backup OS configuration
-files="/etc/conf.d/postgresql"
-for config in $files; do
-    if [ -f $config ]; then
-        cp $config "DISTRO$(echo $config | tr '/' '_')"
-    fi
-done
+# Fetch data about db required for restoration
+info=$(psql -A -l | grep $DB | sed -e 's/|/,/g')
+owner=$(echo $info | cut -d, -f2)
+encoding=$(echo $info | cut -d, -f3)
+
+# Create a readme
+cat <<EOT >> README
+Backup of $DB created: $(date)
+To restore from this backup, you'd do something like:
+
+# Become the postgres user (or whoever owns the db installation)
+user# sudo su - postgres
+
+# This backup does not contain the required users for this db, so you
+# will need to create them before you restore.  Probably something
+# like the following, where you'd need to know the desired password:
+postgres# createuser -P $owner
+
+postgres# createdb -O $owner -E $encoding $DB
+postgres# psql -c -t --quiet $DB < $BACKUP.sql
+
+Please note you might need to restore OS type configuration as well.
+Any config files that were saved as part of the backup appear in this
+backup, with the file system structure mirrored.
+
+Good luck!
+EOT
 
 # Create a tarbal of the backup artifacts
 if ! tar zcpf $BACKUP.tar.gz *; then
