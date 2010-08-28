@@ -9,6 +9,7 @@ source $SRC/pitr/defaults
 
 DB=$1
 BACKUP="${DB}-$(date +'%Y%m%d-%H%M%S')-$(hostname)"
+PGUSER=postgres
 
 # Check to make sure the db is specified
 if [ "$DB" = "" ]; then
@@ -41,7 +42,7 @@ else
 fi
 
 # Perform the backup
-if ! $(pg_dump -U postgres $DB > $BACKUP.sql); then
+if ! $(pg_dump -U $PGUSER $DB > $BACKUP.sql); then
     echo "ERROR: Unable to create $BACKUP.sql"
     exit 1
 fi
@@ -94,7 +95,7 @@ for dir in $dirs; do
 done
 
 # Fetch data about db required for restoration
-info=$(psql -A -l | grep $DB | sed -e 's/|/,/g')
+info=$(psql -U $PGUSER -A -l | grep $DB | sed -e 's/|/,/g')
 owner=$(echo $info | cut -d, -f2)
 encoding=$(echo $info | cut -d, -f3)
 
@@ -104,7 +105,7 @@ Backup of $DB created: $(date)
 To restore from this backup, you'd do something like:
 
 # Become the postgres user (or whoever owns the db installation)
-user# sudo su - postgres
+user# sudo su - $PGUSER
 
 # This backup does not contain the required users for this db, so you
 # will need to create them before you restore.  Probably something
@@ -122,7 +123,7 @@ Good luck!
 EOT
 
 # Create a tarbal of the backup artifacts
-if ! tar zcpf $BACKUP.tar.gz *; then
+if ! tar -zcpf $BACKUP.tar.gz *; then
     echo "ERROR: Unable to create $BACKUP.tar.gz"
     exit 1
 fi
