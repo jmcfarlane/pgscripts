@@ -1,68 +1,19 @@
-#!/bin/bash -e
+#!/bin/bash -eu
 
 # Perform an ascii backup of a single PostgreSQL database
 
 # Constant values
-set -u
-SRC=${0%/*}
+SRC=$(dirname $(which $0))
 source $SRC/pitr/defaults
 
-DB=$1
-BACKUP="${DB}-$(date +'%Y%m%d-%H%M%S')-$(hostname)"
+DB=false
+MAX=120
+PURGE=false
 PGUSER=postgres
-
-# Check to make sure the db is specified
-if [ "$DB" = "" ]; then
-    echo "Please specify which database you want to backup"
-    echo "Example usage: root# pgbackup ntdi"
-    exit 1
-fi
-
-# Check to make sure the backup dir exists
-if [ ! -d $ARCHIVE ]; then
-    if ! mkdir -p $ARCHIVE; then
-        echo "ERROR: Unable to create: $ARCHIVE"
-        exit 1
-    fi
-fi
-
-# Change into the backups directory
-if ! cd $ARCHIVE; then
-    echo "Unable to cd into $ARCHIVE"
-    exit 1
-fi
-
-# Create a temporary working directory and cd into it
-tmpdir="processing-backup.$$"
-if ! mkdir $tmpdir; then
-    echo "Unable to create $ARCHIVE/$tmpdir"
-    exit 1
-else
-    cd $tmpdir
-fi
-
-# Perform the backup
-if ! $(pg_dump -U $PGUSER $DB > $BACKUP.sql); then
-    echo "ERROR: Unable to create $BACKUP.sql"
-    exit 1
-fi
-
-# Generate MD5 of the backup
-echo "# MD5 HASH" > $BACKUP.DIGESTS
-if ! md5sum $BACKUP.sql >> $BACKUP.DIGESTS; then
-    echo "ERROR: Unable to create $BACKUP.DIGESTS"
-    exit 1
-fi
-
-# Generate SHA1 hash of the backup
-echo "# SHA1 HASH" >> $BACKUP.DIGESTS
-if ! sha1sum $BACKUP.sql >> $BACKUP.DIGESTS; then
-    echo "ERROR: Unable to create $BACKUP.sql"
-    exit 1
-fi
+TMPDIR="processing-backup.$$"
 
 # Supported db configurations (aka where distros put stuff)
-dirs="
+CONFIG_DIRS="
     /etc/conf.d
     /etc/postgresql/8.0/main
     /etc/postgresql/8.1/main
@@ -71,36 +22,76 @@ dirs="
     /var/lib/postgresql/data
     /var/log/postgresql
 "
-patterns="
+CONFIG_FILE_PATTERNS="
     *.conf
     *.log
     postgresql
 "
 
-# Attempt to backup the database configuration
-for dir in $dirs; do
-    if [ -d $dir ]; then
-        for pattern in $patterns; do
-            for file in $(find $dir -type f -name $pattern); do
-                if [ -r $file ]; then
-                    copydir=$(dirname $file)
-                    mkdir -p .$copydir
-                    cp $file .$copydir/
-                else
-                    echo "Unable to read from (thus backup): $file"
-                fi
+function backup_configs {
+    # Attempt to backup the database configuration
+    for dir in $CONFIG_DIRS; do
+        if [ -d $dir ]; then
+            for pattern in $CONFIG_FILE_PATTERNS; do
+                for file in $(find $dir -type f -name $pattern); do
+                    if [ -r $file ]; then
+                        copydir=$(dirname $file)
+                        mkdir -p .$copydir
+                        cp $file .$copydir/
+                    else
+                        echo "Unable to read from (thus backup): $file"
+                    fi
+                done
             done
-        done
+        fi
+    done
+}
+
+function backup_database {
+    if ! $(pg_dump -U $PGUSER $DB > $BACKUP.sql); then
+        echo "ERROR: Unable to create $BACKUP.sql"
+        exit 1
     fi
-done
+}
 
-# Fetch data about db required for restoration
-info=$(psql -U $PGUSER -A -l | grep $DB | sed -e 's/|/,/g')
-owner=$(echo $info | cut -d, -f2)
-encoding=$(echo $info | cut -d, -f3)
 
-# Create a readme
-cat <<EOT >> README
+# Be a good little script and clean up after our self
+function clean {
+    # Delete the temporary working directory
+    if ! rm -rf $ARCHIVE/$TMPDIR; then
+        echo "ERROR: Unable to delete $ARCHIVE/$TMPDIR"
+        exit 1
+    fi
+}
+
+function create_tarball {
+    # Create a tarbal of the backup artifacts
+    if ! tar -zcpf $BACKUP.tar.gz *; then
+        echo "ERROR: Unable to create $BACKUP.tar.gz"
+        exit 1
+    fi
+
+    # Move the tarball up into the archive
+    if ! mv $BACKUP.tar.gz ..; then
+        echo "ERROR: Unable to move the tarball into $ARCHIVE"
+        exit 1
+    fi
+
+    # Move back to the archive directory
+    if ! cd $ARCHIVE; then
+        echo "ERROR: Unable to cd to $ARCHIVE"
+        exit 1
+    fi
+}
+
+function generate_readme {
+    # Fetch data about db required for restoration
+    info=$(psql -U $PGUSER -A -l | grep $DB | sed -e 's/|/,/g')
+    owner=$(echo $info | cut -d, -f2)
+    encoding=$(echo $info | cut -d, -f3)
+
+    # Create a readme
+    cat <<EOT >> README
 Backup of $DB created: $(date)
 To restore from this backup, you'd do something like:
 
@@ -121,31 +112,124 @@ backup, with the file system structure mirrored.
 
 Good luck!
 EOT
+}
 
-# Create a tarbal of the backup artifacts
-if ! tar -zcpf $BACKUP.tar.gz *; then
-    echo "ERROR: Unable to create $BACKUP.tar.gz"
+function generate_sums {
+    # Generate md5 hash of the backup
+    echo "# MD5 HASH" > $BACKUP.DIGESTS
+    if ! md5sum $BACKUP.sql >> $BACKUP.DIGESTS; then
+        echo "ERROR: Unable to create $BACKUP.DIGESTS"
+        exit 1
+    fi
+
+    # Generate SHA1 hash of the backup
+    echo "# SHA1 HASH" >> $BACKUP.DIGESTS
+    if ! sha1sum $BACKUP.sql >> $BACKUP.DIGESTS; then
+        echo "ERROR: Unable to create $BACKUP.sql"
+        exit 1
+    fi
+}
+
+# Delete old backups
+function purge_old_backups {
+    count=0
+    ls $ARCHIVE | grep -E "^$DB.*\.tar\.gz" | sort -r | while read b; do
+        count=$((count + 1))
+        echo -n "$count. $b"
+        if [ $count -gt $MAX ]; then
+            if [ $PURGE == true ]; then
+                echo " [PURGING]"
+                if ! rm -f $ARCHIVE/$b; then
+                    echo "Unable to delete old backup ($b)"
+                fi
+            else
+                echo " [WOULD PURGE with -p]"
+            fi
+        else
+            echo " [keep]"
+        fi
+    done
+}
+
+# Make sure required directories exist, and change directories
+function setup {
+
+    # Check to make sure the db is specified
+    if [ "$DB" == false ]; then
+        echo "Please specify which database you want to backup"
+        usage
+    else
+        BACKUP="${DB}-$(date +'%Y%m%d-%H%M%S')-$(hostname)"
+    fi
+
+    # Check to make sure the backup dir exists
+    if [ ! -d $ARCHIVE ]; then
+        if ! mkdir -p $ARCHIVE; then
+            echo "ERROR: Unable to create: $ARCHIVE"
+            exit 1
+        fi
+    fi
+
+    # Change into the backups directory
+    if ! cd $ARCHIVE; then
+        echo "Unable to cd into $ARCHIVE"
+        exit 1
+    fi
+
+    # Create a temporary working directory and cd into it
+    if ! mkdir $TMPDIR; then
+        echo "Unable to create $ARCHIVE/$TMPDIR"
+        exit 1
+    else
+        cd $TMPDIR
+    fi
+}
+
+# How do you use this thing:
+function usage {
+    THIS=$0
+
+    echo
+    echo "Usage: $THIS"
+    echo "Arguments available:
+    -d  Database to backup
+    -m  Max backups to keep, where older ones are deleted (default: $MAX)
+    -p  Enable purging (default: $PURGE)
+    -u  User to perform the backup as (default: $PGUSER)
+
+    Examples:
+
+    user# $THIS foobar
+    user# $THIS -m 30 foobar
+    "
+
     exit 1
-fi
+}
 
-# Move the tarball up into the archive
-if ! mv $BACKUP.tar.gz ..; then
-    echo "ERROR: Unable to move the tarball into $ARCHIVE"
-    exit 1
-fi
+function main {
+    setup
+    backup_database
+    generate_sums
+    backup_configs
+    generate_readme
+    create_tarball
+    purge_old_backups
+    exit 0
+}
 
-# Move back to the archive directory
-if ! cd $ARCHIVE; then
-    echo "ERROR: Unable to cd to $ARCHIVE"
-    exit 1
-fi
+# Go
+trap clean INT TERM EXIT
 
-# Delete the temporary working directory
-if ! rm -rf $ARCHIVE/$tmpdir; then
-    echo "ERROR: Unable to delete $ARCHIVE/$tmpdir"
-    exit 1
-fi
+# Fetch any passed in arguments:
+while getopts "d:hm:pu:" options; do
+    case $options in
+        d ) DB=$OPTARG;;
+        m ) MAX=$OPTARG;;
+        p ) PURGE=true;;
+        u ) PGUSER=$OPTARG;;
+        * ) usage
+        ;;
+    esac
+done
 
-# All is well
-exit 0
-
+main
